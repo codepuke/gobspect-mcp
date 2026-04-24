@@ -7,6 +7,7 @@ import (
 
 	"github.com/codepuke/gobspect"
 	"github.com/codepuke/gobspect/query"
+	"github.com/codepuke/gobspect/sortval"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -53,7 +54,7 @@ func handleDecode(_ context.Context, _ *mcp.CallToolRequest, in DecodeInput) (*m
 		return nil, nil, fmt.Errorf("unknown format %q; use pretty or json", format)
 	}
 
-	bytesFormat, ok := parseBytesFormat(in.Bytes)
+	bytesFormat, ok := gobspect.ParseBytesFormat(in.Bytes)
 	if !ok {
 		return nil, nil, fmt.Errorf("unknown bytes value %q; use hex, base64, or literal", in.Bytes)
 	}
@@ -69,15 +70,15 @@ func handleDecode(_ context.Context, _ *mcp.CallToolRequest, in DecodeInput) (*m
 	}
 	ins := gobspect.New(inspOpts...)
 
-	queryExpr := normalizeQuery(in.Query)
+	queryExpr := query.NormalizeQuery(in.Query)
 	path, err := query.Parse(queryExpr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("invalid query expression %q: %w", in.Query, err)
 	}
 
-	var sortSpec SortSpec
+	var sortSpec sortval.SortSpec
 	if in.Sort != "" {
-		sortSpec, err = ParseSortSpec(in.Sort, in.SortDesc, in.SortFold, in.SortDropMissing)
+		sortSpec, err = sortval.ParseSortSpec(in.Sort, in.SortDesc, in.SortFold, in.SortDropMissing)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -114,7 +115,7 @@ func handleDecode(_ context.Context, _ *mcp.CallToolRequest, in DecodeInput) (*m
 			}
 		}
 
-		sorted := sortMatches(seqOf(allResults), sortSpec)
+		sorted := sortval.SortMatches(sortval.SeqOf(allResults), sortSpec)
 		for pos, result := range sorted {
 			if pos < in.Offset {
 				continue

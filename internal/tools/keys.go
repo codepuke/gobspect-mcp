@@ -39,7 +39,7 @@ func handleKeys(_ context.Context, _ *mcp.CallToolRequest, in KeysInput) (*mcp.C
 	}
 	ins := gobspect.New(inspOpts...)
 
-	queryExpr := normalizeQuery(in.Query)
+	queryExpr := query.NormalizeQuery(in.Query)
 	path, err := query.Parse(queryExpr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("invalid query expression %q: %w", in.Query, err)

@@ -10,6 +10,7 @@ import (
 
 	"github.com/codepuke/gobspect"
 	"github.com/codepuke/gobspect-mcp/internal/tools"
+	"github.com/codepuke/gobspect/tabular"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 )
@@ -74,9 +75,9 @@ func TestHandleTabular_ScalarRow(t *testing.T) {
 	assert.Contains(t, out, "99")
 }
 
-// TestTabularCellString exercises the tabularCellString function across all branches.
+// TestTabularCellString exercises CellString across all branches.
 func TestTabularCellString(t *testing.T) {
-	fn := tools.TabularCellStringForTest
+	fn := tabular.CellString
 	assert.Equal(t, "hello", fn(gobspect.StringValue{V: "hello"}))
 	assert.Equal(t, "42", fn(gobspect.IntValue{V: 42}))
 	assert.Equal(t, "7", fn(gobspect.UintValue{V: 7}))

@@ -26,4 +26,3 @@ func HandleTabularForTest(ctx context.Context, req *mcp.CallToolRequest, in Tabu
 	return handleTabular(ctx, req, in)
 }
 
-var TabularCellStringForTest = tabularCellString
