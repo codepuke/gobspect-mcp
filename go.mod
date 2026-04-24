@@ -2,10 +2,8 @@ module github.com/codepuke/gobspect-mcp
 
 go 1.26.2
 
-replace github.com/codepuke/gobspect => ../gobspect
-
 require (
-	github.com/codepuke/gobspect v0.0.0-00010101000000-000000000000
+	github.com/codepuke/gobspect v0.1.0
 	github.com/dsnet/compress v0.0.1
 	github.com/klauspost/compress v1.18.5
 	github.com/modelcontextprotocol/go-sdk v1.5.0
