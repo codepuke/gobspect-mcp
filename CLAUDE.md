@@ -42,6 +42,20 @@ Every tool accepts exactly one of:
 
 `internal/tools/input.Resolve` enforces this exclusivity and returns an `io.Reader`. All tool handlers call `input.Resolve` first.
 
+### Automatic decompression
+
+When `file` is used, `Resolve` inspects the path's extension and transparently wraps the file reader with a matching decompressor so handlers see raw gob bytes:
+
+| Extension | Wrapper |
+|-----------|---------|
+| `.gz`, `.gzip` | `gzip.NewReader` |
+| `.zst`, `.zstd` | `zstd.NewReader` |
+| `.bz2` | `bzip2.NewReader` |
+| `.xz` | `xz.NewReader` |
+| `.zip` | `zip.OpenReader` — single-entry archives only; errors if the archive contains 0 or >1 files |
+
+Extensions are matched case-insensitively. Compound extensions such as `.gob.gz` are handled by the outermost extension (`.gz`). `data` input is always raw gob bytes — callers must decompress before base64-encoding.
+
 ## Code Style
 
 - Standard Go conventions. Run `gofmt`, `go vet`, `staticcheck`.

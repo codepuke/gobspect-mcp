@@ -19,7 +19,7 @@ The server runs as a subprocess communicating over stdin/stdout (`StdioTransport
 - No HTTP or WebSocket transport — stdio only
 - No streaming of large result sets — results collected in memory
 - No custom opaque decoder registration via MCP — built-in decoders only
-- No compressed stream handling (clients should decompress before passing `data`)
+- No compressed `data` handling (base64 bytes must be raw gob). File inputs are auto-decompressed by extension (see §5.3).
 
 ---
 
@@ -74,11 +74,27 @@ If both are empty, `Resolve` returns an error: `"provide either data or file"`.
 
 ```go
 // Resolve decodes base64 data or opens the named file and returns a reader
-// over the raw gob bytes. Caller is responsible for closing file-based readers.
+// over the raw gob bytes. For file inputs, a recognized compression extension
+// causes the reader to be wrapped with a matching decompressor. Caller is
+// responsible for closing file-based readers.
 func Resolve(data, file string) (io.ReadCloser, error)
 ```
 
-Returns an `io.ReadCloser` — for base64 data it wraps `bytes.Reader` with a no-op closer; for files it returns the open `*os.File`. Callers `defer r.Close()`.
+Returns an `io.ReadCloser` — for base64 data it wraps `bytes.Reader` with a no-op closer; for plain files it returns the open `*os.File`; for compressed files it returns a composite closer that closes both the decompressor and the underlying file. Callers `defer r.Close()`.
+
+### 5.3 Automatic Decompression
+
+When `file` is provided, `Resolve` matches the path's extension case-insensitively and wraps the reader with the matching decompressor so handlers always see raw gob bytes:
+
+| Extension | Wrapper |
+|-----------|---------|
+| `.gz`, `.gzip` | `compress/gzip.NewReader` |
+| `.zst`, `.zstd` | `github.com/klauspost/compress/zstd.NewReader` |
+| `.bz2` | `compress/bzip2.NewReader` |
+| `.xz` | `github.com/ulikunitz/xz.NewReader` |
+| `.zip` | `archive/zip.OpenReader` — archive must contain exactly one file; otherwise returns `"zip archive must contain exactly one file"` |
+
+Compound suffixes (`.gob.gz`) are resolved by the outermost extension. Unrecognized extensions are treated as raw gob. `data` input is never decompressed — clients must pass raw gob bytes encoded as base64.
 
 ---
 

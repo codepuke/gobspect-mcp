@@ -258,6 +258,20 @@ base64 < data.gob
 [Convert]::ToBase64String([IO.File]::ReadAllBytes("C:\path\to\data.gob"))
 ```
 
+#### Automatic decompression
+
+When using `file`, the server inspects the path's extension (case-insensitive) and transparently decompresses on read:
+
+| Extension | Format |
+|-----------|--------|
+| `.gz`, `.gzip` | gzip |
+| `.zst`, `.zstd` | zstandard |
+| `.bz2` | bzip2 |
+| `.xz` | xz |
+| `.zip` | zip (archive must contain exactly one entry) |
+
+So `/data/orders.gob.gz` and `/data/orders.gob` work identically. Compound extensions resolve on the outermost suffix only. The `data` parameter is always treated as raw gob bytes — decompress client-side before base64-encoding.
+
 ---
 
 ### `gob_schema`

@@ -48,6 +48,18 @@ base64 < data.gob
 
 If the user gives you a file path, always prefer `file` — it avoids transmitting large base64 blobs.
 
+**Compressed files are auto-decompressed** when passed via `file`. The server detects the extension (case-insensitive) and transparently wraps the reader:
+
+| Extension | Format |
+|-----------|--------|
+| `.gz`, `.gzip` | gzip |
+| `.zst`, `.zstd` | zstandard |
+| `.bz2` | bzip2 |
+| `.xz` | xz |
+| `.zip` | zip (single entry only) |
+
+Pass `/data/orders.gob.gz` directly — no need to decompress first. `data` is always raw gob bytes; decompress client-side before base64-encoding.
+
 ---
 
 ## Recommended workflow for an unknown gob stream
