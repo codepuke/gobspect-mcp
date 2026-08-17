@@ -25,4 +25,3 @@ func HandleKeysForTest(ctx context.Context, req *mcp.CallToolRequest, in KeysInp
 func HandleTabularForTest(ctx context.Context, req *mcp.CallToolRequest, in TabularInput) (*mcp.CallToolResult, any, error) {
 	return handleTabular(ctx, req, in)
 }
-

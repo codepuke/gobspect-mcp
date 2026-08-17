@@ -225,3 +225,25 @@ func TestHandleDecode_Raw(t *testing.T) {
 		t.Errorf("expected 'inner', got: %s", out)
 	}
 }
+
+func TestHandleDecode_NegativeIndex(t *testing.T) {
+	idx := -1
+	_, _, err := tools.HandleDecodeForTest(context.Background(), &mcp.CallToolRequest{},
+		tools.DecodeInput{File: fixturePath("multi_value.gob"), Index: &idx})
+	if err == nil || !strings.Contains(err.Error(), "index must be non-negative") {
+		t.Errorf("expected negative-index error, got: %v", err)
+	}
+}
+
+// TestHandleDecode_SignedUintFilterLiteral pins the gobspect v0.2.2 fix:
+// '+'-prefixed integer literals compare numerically against uint fields.
+func TestHandleDecode_SignedUintFilterLiteral(t *testing.T) {
+	type counter struct{ N uint }
+	out := callDecode(t, tools.DecodeInput{
+		Data:  gobBase64(t, counter{N: 5}),
+		Query: "[N==+5]",
+	})
+	if !strings.Contains(out, "5") {
+		t.Errorf("expected [N==+5] to match uint 5, got: %s", out)
+	}
+}

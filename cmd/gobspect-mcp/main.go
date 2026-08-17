@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	s := mcp.NewServer(&mcp.Implementation{Name: "gobspect-mcp", Version: "0.1.0"}, nil)
+	s := mcp.NewServer(&mcp.Implementation{Name: "gobspect-mcp", Version: "0.1.1"}, nil)
 	tools.Register(s)
 	session, err := s.Connect(context.Background(), &mcp.StdioTransport{}, nil)
 	if err != nil {

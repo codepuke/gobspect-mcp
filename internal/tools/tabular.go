@@ -53,6 +53,9 @@ func handleTabular(_ context.Context, _ *mcp.CallToolRequest, in TabularInput) (
 	if format != "csv" && format != "tsv" {
 		return nil, nil, fmt.Errorf("unknown format %q; use csv or tsv", format)
 	}
+	if in.Index != nil && *in.Index < 0 {
+		return nil, nil, fmt.Errorf("index must be non-negative")
+	}
 
 	heteroMode, ok := tabular.ParseHeterogeneousMode(in.Hetero)
 	if !ok {

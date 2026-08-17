@@ -48,6 +48,9 @@ func handleKeys(_ context.Context, _ *mcp.CallToolRequest, in KeysInput) (*mcp.C
 	// Find the target top-level value (default: first = index 0).
 	targetIdx := 0
 	if in.Index != nil {
+		if *in.Index < 0 {
+			return nil, nil, fmt.Errorf("index must be non-negative")
+		}
 		targetIdx = *in.Index
 	}
 

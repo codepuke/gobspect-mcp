@@ -31,8 +31,8 @@ The server registers five tools with `mcp.AddTool` and runs forever via `server.
 
 ## Key Dependencies
 
-- `github.com/codepuke/gobspect` — decode-only gob inspection library (local replace, see go.mod)
-- `github.com/modelcontextprotocol/go-sdk` v0.8.0 — MCP server/client SDK
+- `github.com/codepuke/gobspect` — decode-only gob inspection library (tagged release, see go.mod)
+- `github.com/modelcontextprotocol/go-sdk` — MCP server/client SDK
 
 ## Tool Input Convention
 
@@ -75,8 +75,7 @@ Extensions are matched case-insensitively. Compound extensions such as `.gob.gz`
 
 ## Things to Watch Out For
 
-- `gob_decode` and `gob_tabular` share sorting logic with `gq`; do NOT import `cmd/gq` — reimplement the sort helpers cleanly in `internal/tools`.
-- The tabular printer in `gq` is a good reference but must be reimplemented (package `main` is not importable).
-- For `gob_tabular`, the `hetero` mode (first/reject/union/partition) follows the exact semantics documented in the gq README and `cmd/gq/tabular.go`.
+- Sorting and tabular output come from the `gobspect/sortval` and `gobspect/tabular` packages — do NOT reimplement them or import `cmd/gq` (package `main` is not importable).
+- For `gob_tabular`, the `hetero` mode (first/reject/union/partition) follows the exact semantics documented in the gq README and the `gobspect/tabular` package.
 - `query.Parse` panics on syntactically invalid expressions in the convenience functions (`Get`, `All`). Always use `query.Parse` + `query.AllPath`/`query.GetPath` in tool handlers so errors surface as tool errors, not panics.
 - Output size: tools collect results in memory. LLM callers should use `limit` to bound output.

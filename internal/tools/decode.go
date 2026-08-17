@@ -53,6 +53,9 @@ func handleDecode(_ context.Context, _ *mcp.CallToolRequest, in DecodeInput) (*m
 	if format != "pretty" && format != "json" {
 		return nil, nil, fmt.Errorf("unknown format %q; use pretty or json", format)
 	}
+	if in.Index != nil && *in.Index < 0 {
+		return nil, nil, fmt.Errorf("index must be non-negative")
+	}
 
 	bytesFormat, ok := gobspect.ParseBytesFormat(in.Bytes)
 	if !ok {

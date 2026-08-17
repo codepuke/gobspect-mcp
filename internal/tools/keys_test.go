@@ -82,3 +82,12 @@ func TestHandleKeys_Index(t *testing.T) {
 		t.Errorf("expected SimpleStruct field names, got: %s", out)
 	}
 }
+
+func TestHandleKeys_NegativeIndex(t *testing.T) {
+	idx := -1
+	_, _, err := tools.HandleKeysForTest(context.Background(), &mcp.CallToolRequest{},
+		tools.KeysInput{File: fixturePath("multi_value.gob"), Index: &idx})
+	if err == nil || !strings.Contains(err.Error(), "index must be non-negative") {
+		t.Errorf("expected negative-index error, got: %v", err)
+	}
+}

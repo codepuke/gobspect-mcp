@@ -101,3 +101,12 @@ func TestHandleTabular_Query(t *testing.T) {
 		t.Errorf("expected inner struct fields after query, got: %s", out)
 	}
 }
+
+func TestHandleTabular_NegativeIndex(t *testing.T) {
+	idx := -1
+	_, _, err := tools.HandleTabularForTest(context.Background(), &mcp.CallToolRequest{},
+		tools.TabularInput{File: fixturePath("multi_value.gob"), Index: &idx})
+	if err == nil || !strings.Contains(err.Error(), "index must be non-negative") {
+		t.Errorf("expected negative-index error, got: %v", err)
+	}
+}

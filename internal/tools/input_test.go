@@ -77,8 +77,8 @@ func TestResolve_CompressedFiles(t *testing.T) {
 	require.NoError(t, err)
 
 	cases := []struct {
-		name    string
-		ext     string
+		name     string
+		ext      string
 		compress func(t *testing.T, path string, raw []byte)
 	}{
 		{"gzip lowercase", ".gz", writeGzip},
