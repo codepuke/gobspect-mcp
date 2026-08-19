@@ -2,7 +2,10 @@
 
 // generate.go produces gob-encoded fixture files used in tests.
 //
-//	go run internal/tools/testdata/generate.go
+//	cd internal/tools && go run testdata/generate.go
+//
+// Note that map_value.gob encodes a map, whose gob byte order is not stable
+// across runs; regenerating it produces spurious diffs.
 package main
 
 import (
@@ -19,6 +22,19 @@ type SimpleStruct struct {
 type NestedStruct struct {
 	Inner SimpleStruct
 	Score float64
+}
+
+// PersonA and PersonB share a Name field so a sort key resolves in both
+// partitions, which is what makes global vs. per-partition sorting
+// distinguishable in hetero=partition mode.
+type PersonA struct {
+	Name string
+	Age  int
+}
+
+type PersonB struct {
+	Name string
+	City string
 }
 
 type Animal interface{}
@@ -53,6 +69,15 @@ func main() {
 	writeMulti("testdata/hetero.gob",
 		SimpleStruct{ID: 1, Name: "first"},
 		NestedStruct{Inner: SimpleStruct{ID: 2, Name: "second"}, Score: 1.0},
+	)
+
+	// Interleaved types whose names sort differently within a partition than
+	// they do globally.
+	writeMulti("testdata/hetero_sort.gob",
+		PersonA{Name: "carol", Age: 30},
+		PersonB{Name: "zoe", City: "oslo"},
+		PersonA{Name: "alice", Age: 41},
+		PersonB{Name: "amy", City: "kyoto"},
 	)
 }
 

@@ -1,5 +1,5 @@
-github.com/codepuke/gobspect v0.2.3 h1:TXjcc8p+UGZfQDRNVx7/+etT5e59tBDp9cunVuNE5Tc=
-github.com/codepuke/gobspect v0.2.3/go.mod h1:8bj+zGnPvKa/fIBFeytXvocFEJnkCR5T7Y05J2JWBCs=
+github.com/codepuke/gobspect v0.3.1 h1:moKU9mH8hX7As3TyVRx0l1zB04+C/eKUGBiw5os1I48=
+github.com/codepuke/gobspect v0.3.1/go.mod h1:f5zSxAKyMQn9rPs1eDvGGUQSL7lsTt98d+cm41TWkbE=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dsnet/compress v0.0.1 h1:PlZu0n3Tuv04TzpfPbrnI0HW/YwodEXDS+oPKahKF0Q=

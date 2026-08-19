@@ -18,7 +18,8 @@ When asked to implement a PRD.md:
 gobspect-mcp/
 ├── cmd/gobspect-mcp/main.go    # Entry point: server setup, StdioTransport, tool registration
 ├── internal/tools/
-│   ├── input.go                # Resolve(data, file string) (io.Reader, error)
+│   ├── input.go                # Resolve(data, file, readLimit) (io.ReadCloser, error)
+│   ├── limits.go               # read/output limits and the output-cap helpers
 │   ├── schema.go               # gob_schema tool handler
 │   ├── types.go                # gob_types tool handler
 │   ├── decode.go               # gob_decode tool handler
@@ -40,26 +41,29 @@ Every tool accepts exactly one of:
 - `data` (string): Base64 Standard Encoding of raw gob bytes
 - `file` (string): Absolute path to a `.gob` file on the filesystem
 
-`internal/tools/input.Resolve` enforces this exclusivity and returns an `io.Reader`. All tool handlers call `input.Resolve` first.
+`tools.Resolve(data, file string, readLimit int64) (io.ReadCloser, error)` enforces this exclusivity. All tool handlers call it first and `defer r.Close()`.
+
+Every tool also accepts `read_limit` and `output_limit`; see "Resource limits" below.
 
 ### Automatic decompression
 
-When `file` is used, `Resolve` inspects the path's extension and transparently wraps the file reader with a matching decompressor so handlers see raw gob bytes:
+`Resolve` hands the source to `gobspect/decompress.Reader`, which sniffs the leading magic bytes and removes one compression layer — gzip, zstd, xz, bzip2, or single-entry zip — so handlers always see raw gob bytes. Unrecognized input passes through byte-identical.
 
-| Extension | Wrapper |
-|-----------|---------|
-| `.gz`, `.gzip` | `gzip.NewReader` |
-| `.zst`, `.zstd` | `zstd.NewReader` |
-| `.bz2` | `bzip2.NewReader` |
-| `.xz` | `xz.NewReader` |
-| `.zip` | `zip.OpenReader` — single-entry archives only; errors if the archive contains 0 or >1 files |
+Detection is by **content, never by extension**, and it applies to `data` and `file` alike. Do not add extension dispatch back: a mislabeled name must not select a codec. Zip input is buffered fully in memory, which is why `Resolve` caps the source reader.
 
-Extensions are matched case-insensitively. Compound extensions such as `.gob.gz` are handled by the outermost extension (`.gz`). `data` input is always raw gob bytes — callers must decompress before base64-encoding.
+### Resource limits
+
+All input is untrusted and the whole response is returned as one MCP text block, so both are bounded (see `internal/tools/limits.go`):
+
+- `read_limit` — decompressed bytes, wired to `gobspect.WithReadLimit`, and also used as the source cap inside `Resolve`. Default 64 MiB, max 1 GiB.
+- `output_limit` — response bytes. Default 1 MiB, max 16 MiB.
+
+Zero is rejected for both; unlimited is the configuration these prevent. `gob_decode` stops between whole rendered values via the `errOutputLimit` sentinel returned from the pipeline sink; `gob_tabular` caps the printer's writer and trims to a line boundary; `gob_schema` truncates at a line boundary; `gob_types` and `gob_keys` emit a single JSON document, so they error rather than produce invalid JSON.
 
 ## Code Style
 
 - Standard Go conventions. Run `gofmt`, `go vet`, `staticcheck`.
-- Error messages: lowercase, no trailing punctuation, include context: `"resolving input: %w"`.
+- Error messages: lowercase, no trailing punctuation, include context: `"decoding stream: %w"`. Note that `Resolve`'s errors are returned verbatim by handlers, not re-wrapped — tests assert on the unwrapped text.
 - No panics in tool handlers. Return errors; the SDK converts them to tool errors.
 - Use the generic `mcp.AddTool[In, Out]` function with typed input structs — do NOT use `server.AddTool` (raw handler).
 - Input structs live in the same file as the handler. Keep tool input structs small and focused.
@@ -70,12 +74,16 @@ Extensions are matched case-insensitively. Compound extensions such as `.gob.gz`
 - Use `github.com/stretchr/testify` for assertions.
 - Table-driven tests with `t.Run()`.
 - Gob test fixtures live in `internal/tools/testdata/`.
-- Use `go generate` via `testdata/generate.go` to regenerate fixtures when types change.
+- Regenerate fixtures with `cd internal/tools && go run testdata/generate.go` when types change. Do not commit a regenerated `map_value.gob` — gob's map byte order is unstable, so it diffs spuriously.
 - Test each tool handler directly (not via MCP protocol); wire up an in-memory MCP connection only for integration tests.
+- Fuzz targets live in `internal/tools/fuzz_test.go` and follow gobspect's convention: a first-line `// Fuzzing baseline: <date>. Ran <t>, no failures, <n> corpus entries.` comment, updated after each real run. Fuzzed bytes always go through the base64 `data` input — never fuzz caller-supplied file paths against the real filesystem.
+- Where a tool claims equivalence to a gq invocation, prefer a parity assertion. `TestHandleTabular_PartitionMatchesGQ` cross-checks the real binary when `gq` is on `PATH` and skips otherwise.
 
 ## Things to Watch Out For
 
-- Sorting and tabular output come from the `gobspect/sortval` and `gobspect/tabular` packages — do NOT reimplement them or import `cmd/gq` (package `main` is not importable).
-- For `gob_tabular`, the `hetero` mode (first/reject/union/partition) follows the exact semantics documented in the gq README and the `gobspect/tabular` package.
+- The query→index→sort→offset→limit pipeline and gq's value renderer come from `gobspect/gq` (`gq.Pipeline`, `gq.Render`); decompression comes from `gobspect/decompress`; sorting and tabular output from `gobspect/sortval` and `gobspect/tabular`. Do NOT reimplement any of them — that duplication is exactly what v0.3.1 removed. `cmd/gq` remains unimportable (`package main`), but everything it does is now library code.
+- `gq.Pipeline`'s zero `Index` selects only the **first** top-level value. Map a nil `*int` input to `gq.IndexAll`, never to 0.
+- `gq.Pipeline` returns decode errors unwrapped and sink errors wrapped in `*gq.SinkError`. Handlers must re-add their own `"decoding stream: %w"` context and unwrap sink errors, or error text drifts.
+- For `gob_tabular`, the `hetero` mode (first/reject/union/partition) follows the exact semantics documented in the gq README and the `gobspect/tabular` package. `gq.RunTabular` reads the printer's mode and sorts per struct-type partition in `partition` mode — do not sort globally before it.
 - `query.Parse` panics on syntactically invalid expressions in the convenience functions (`Get`, `All`). Always use `query.Parse` + `query.AllPath`/`query.GetPath` in tool handlers so errors surface as tool errors, not panics.
-- Output size: tools collect results in memory. LLM callers should use `limit` to bound output.
+- Output size: tools collect results in memory. `output_limit` bounds the response, but `limit` is still the better tool for LLM callers — it bounds the work, not just the text.

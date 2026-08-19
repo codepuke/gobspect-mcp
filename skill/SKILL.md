@@ -48,17 +48,19 @@ base64 < data.gob
 
 If the user gives you a file path, always prefer `file` — it avoids transmitting large base64 blobs.
 
-**Compressed files are auto-decompressed** when passed via `file`. The server detects the extension (case-insensitive) and transparently wraps the reader:
+**Compressed input is auto-decompressed** on both `data` and `file`. The server sniffs the leading magic bytes, so detection does not depend on the file name:
 
-| Extension | Format |
-|-----------|--------|
-| `.gz`, `.gzip` | gzip |
-| `.zst`, `.zstd` | zstandard |
-| `.bz2` | bzip2 |
-| `.xz` | xz |
-| `.zip` | zip (single entry only) |
+| Format | Notes |
+|--------|-------|
+| gzip | |
+| zstandard | |
+| bzip2 | |
+| xz | |
+| zip | single entry only |
 
-Pass `/data/orders.gob.gz` directly — no need to decompress first. `data` is always raw gob bytes; decompress client-side before base64-encoding.
+Pass `/data/orders.gob.gz` directly — no need to decompress first. A gzipped file named `.gob`, or a plain gob file named `.gz`, both work: the extension is ignored entirely. Base64 `data` may also be compressed.
+
+**Resource limits.** Every tool accepts `read_limit` (default 64 MiB of decompressed input, max 1 GiB) and `output_limit` (default 1 MiB of response text, max 16 MiB). Neither accepts 0. If a response comes back ending in `... output truncated at N bytes`, narrow the `query` or lower `limit` rather than raising `output_limit` — a smaller result is usually the better answer. `gob_types` and `gob_keys` return one JSON document, so they error instead of truncating.
 
 ---
 
@@ -184,6 +186,8 @@ Key parameters:
 | `max_bytes` | 64 | Truncation limit; 0 = no limit |
 | `null_on_miss` | false | Return `"null"` instead of error on no match |
 | `time_format` | RFC3339Nano | Go time layout for `time.Time` |
+| `read_limit` | 64 MiB | Max decompressed input bytes |
+| `output_limit` | 1 MiB | Max response bytes before truncation |
 
 **JSON output** is newline-delimited (one JSON object per result line). Use `format: "json"` when the user wants to pipe results or inspect the AST.
 
@@ -204,7 +208,7 @@ Key parameters (in addition to the shared ones above):
 | `first` | Silently skip rows whose type differs from the first row |
 | `reject` | Return an error on any type mismatch |
 | `union` | Grow headers when new columns appear; earlier rows get empty cells |
-| `partition` | Emit a blank line and a new header when the type changes |
+| `partition` | Emit a blank line and a new header when the type changes; a `sort` orders rows within each partition |
 
 ### gob_types
 

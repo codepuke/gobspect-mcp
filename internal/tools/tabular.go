@@ -1,11 +1,12 @@
 package tools
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/codepuke/gobspect"
+	"github.com/codepuke/gobspect/gq"
 	"github.com/codepuke/gobspect/query"
 	"github.com/codepuke/gobspect/sortval"
 	"github.com/codepuke/gobspect/tabular"
@@ -30,6 +31,8 @@ type TabularInput struct {
 	Bytes           string `json:"bytes,omitempty"             jsonschema:"Byte rendering: hex (default), base64, or literal"`
 	MaxBytes        *int   `json:"max_bytes,omitempty"         jsonschema:"Truncation limit for byte slices (0 = no limit; default 64)"`
 	TimeFormat      string `json:"time_format,omitempty"       jsonschema:"Go time layout for time.Time values (default: RFC3339Nano)"`
+	ReadLimit       *int64 `json:"read_limit,omitempty"        jsonschema:"Max decompressed bytes to read from the input (default 67108864, max 1073741824)"`
+	OutputLimit     *int   `json:"output_limit,omitempty"      jsonschema:"Max response bytes before truncation (default 1048576, max 16777216)"`
 }
 
 func registerTabular(s *mcp.Server) {
@@ -40,7 +43,12 @@ func registerTabular(s *mcp.Server) {
 }
 
 func handleTabular(_ context.Context, _ *mcp.CallToolRequest, in TabularInput) (*mcp.CallToolResult, any, error) {
-	r, err := Resolve(in.Data, in.File)
+	readLimit, outputLimit, err := resolveLimits(in.ReadLimit, in.OutputLimit)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	r, err := Resolve(in.Data, in.File, readLimit)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -72,7 +80,7 @@ func handleTabular(_ context.Context, _ *mcp.CallToolRequest, in TabularInput) (
 		maxBytes = *in.MaxBytes
 	}
 
-	var inspOpts []gobspect.Option
+	inspOpts := []gobspect.Option{gobspect.WithReadLimit(readLimit)}
 	if in.TimeFormat != "" {
 		inspOpts = append(inspOpts, gobspect.WithTimeFormat(in.TimeFormat))
 	}
@@ -98,8 +106,10 @@ func handleTabular(_ context.Context, _ *mcp.CallToolRequest, in TabularInput) (
 	}
 
 	stream := ins.Stream(r)
-	var buf bytes.Buffer
-	tp := tabular.NewPrinter(&buf,
+	// The printer buffers rows in some heterogeneous modes, so the output
+	// limit is enforced on its writer and the result trimmed to a whole line.
+	buf := &capWriter{limit: outputLimit}
+	tp := tabular.NewPrinter(buf,
 		tabular.WithDelimiter(delim),
 		tabular.WithNoHeaders(in.NoHeaders),
 		tabular.WithStream(stream),
@@ -108,76 +118,38 @@ func handleTabular(_ context.Context, _ *mcp.CallToolRequest, in TabularInput) (
 		tabular.WithHeterogeneousMode(heteroMode),
 	)
 
-	idx := 0
-	resultN := 0
-
-	if len(spec.Keys) > 0 {
-		var allResults []gobspect.Value
-		for v, err := range stream.Values() {
-			if err != nil {
-				return nil, nil, fmt.Errorf("decoding stream: %w", err)
-			}
-			if in.Index != nil && idx != *in.Index {
-				idx++
-				continue
-			}
-			for result := range query.AllPathSeq(v, path) {
-				allResults = append(allResults, result)
-			}
-			idx++
-			if in.Index != nil && idx > *in.Index {
-				break
-			}
-		}
-
-		sorted := sortval.SortMatches(sortval.SeqOf(allResults), spec)
-		for pos, result := range sorted {
-			if pos < in.Offset {
-				continue
-			}
-			if err := tp.WriteValue(result); err != nil {
-				return nil, nil, err
-			}
-			resultN++
-			if in.Limit > 0 && resultN >= in.Limit {
-				break
-			}
-		}
-	} else {
-	outer:
-		for v, err := range stream.Values() {
-			if err != nil {
-				return nil, nil, fmt.Errorf("decoding stream: %w", err)
-			}
-			if in.Index != nil && idx != *in.Index {
-				idx++
-				continue
-			}
-			for result := range query.AllPathSeq(v, path) {
-				pos := resultN
-				resultN++
-				if pos < in.Offset {
-					continue
-				}
-				if err := tp.WriteValue(result); err != nil {
-					return nil, nil, err
-				}
-				if in.Limit > 0 && resultN-in.Offset >= in.Limit {
-					break outer
-				}
-			}
-			idx++
-			if in.Index != nil && idx > *in.Index {
-				break
-			}
-		}
+	p := gq.Pipeline{
+		Path:   path,
+		Index:  gq.IndexAll,
+		Offset: in.Offset,
+		Limit:  in.Limit,
+		Sort:   spec,
+	}
+	if in.Index != nil {
+		p.Index = *in.Index
 	}
 
-	if err := tp.Flush(); err != nil {
+	// RunTabular reads the printer's heterogeneous mode, so a sort in
+	// partition mode orders rows within each struct-type partition rather than
+	// globally — matching the tables the printer emits.
+	if _, err := p.RunTabular(stream, tp); err != nil && !errors.Is(err, errOutputLimit) {
+		var sinkErr *gq.SinkError
+		if errors.As(err, &sinkErr) {
+			return nil, nil, sinkErr.Err
+		}
+		return nil, nil, fmt.Errorf("decoding stream: %w", err)
+	}
+
+	if err := tp.Flush(); err != nil && !errors.Is(err, errOutputLimit) {
 		return nil, nil, fmt.Errorf("flushing tabular output: %w", err)
 	}
 
+	out := buf.buf.String()
+	if buf.truncated {
+		out = clampToLine(out, outputLimit) + truncationNotice(outputLimit)
+	}
+
 	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: buf.String()}},
+		Content: []mcp.Content{&mcp.TextContent{Text: out}},
 	}, nil, nil
 }

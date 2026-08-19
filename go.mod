@@ -3,7 +3,7 @@ module github.com/codepuke/gobspect-mcp
 go 1.26.2
 
 require (
-	github.com/codepuke/gobspect v0.2.3
+	github.com/codepuke/gobspect v0.3.1
 	github.com/dsnet/compress v0.0.1
 	github.com/klauspost/compress v1.19.2
 	github.com/modelcontextprotocol/go-sdk v1.7.0

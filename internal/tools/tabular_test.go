@@ -2,11 +2,14 @@ package tools_test
 
 import (
 	"context"
+	"os/exec"
 	"strings"
 	"testing"
 
 	"github.com/codepuke/gobspect-mcp/internal/tools"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func callTabular(t *testing.T, in tools.TabularInput) string {
@@ -109,4 +112,53 @@ func TestHandleTabular_NegativeIndex(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "index must be non-negative") {
 		t.Errorf("expected negative-index error, got: %v", err)
 	}
+}
+
+// TestHandleTabular_PartitionSortsPerPartition pins gq's partition semantics:
+// with hetero=partition the printer emits one table per struct type, so a sort
+// must order rows within each partition. Sorting globally interleaves rows
+// across the partition boundaries the printer draws.
+func TestHandleTabular_PartitionSortsPerPartition(t *testing.T) {
+	out := callTabular(t, tools.TabularInput{
+		File:   fixturePath("hetero_sort.gob"),
+		Hetero: "partition",
+		Sort:   "Name",
+	})
+
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	var names []string
+	for _, ln := range lines {
+		fields := strings.Split(ln, ",")
+		if len(fields) == 0 || fields[0] == "Name" || fields[0] == "" {
+			continue
+		}
+		names = append(names, fields[0])
+	}
+
+	// PersonA arrives first, so its partition prints first: alice, carol.
+	// Then PersonB: amy, zoe. A global sort would give alice, amy, carol, zoe.
+	assert.Equal(t, []string{"alice", "carol", "amy", "zoe"}, names,
+		"rows must be sorted within each type partition, not globally\n%s", out)
+}
+
+// TestHandleTabular_PartitionMatchesGQ cross-checks the same request against
+// the real gq binary when one is installed, so the "Equivalent to 'gq ...'"
+// claim in the tool description is verifiable rather than asserted.
+func TestHandleTabular_PartitionMatchesGQ(t *testing.T) {
+	bin, err := exec.LookPath("gq")
+	if err != nil {
+		t.Skip("gq not installed; skipping cross-check")
+	}
+
+	cmd := exec.Command(bin, "-f", fixturePath("hetero_sort.gob"),
+		"-format", "csv", "-hetero", "partition", "-sort", "Name")
+	want, err := cmd.Output()
+	require.NoError(t, err)
+
+	got := callTabular(t, tools.TabularInput{
+		File:   fixturePath("hetero_sort.gob"),
+		Hetero: "partition",
+		Sort:   "Name",
+	})
+	assert.Equal(t, string(want), got)
 }

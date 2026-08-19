@@ -1,12 +1,18 @@
 package tools_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/gob"
 	"strings"
 	"testing"
 
+	"github.com/codepuke/gobspect"
 	"github.com/codepuke/gobspect-mcp/internal/tools"
+	"github.com/codepuke/gobspect/gq"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func callDecode(t *testing.T, in tools.DecodeInput) string {
@@ -246,4 +252,39 @@ func TestHandleDecode_SignedUintFilterLiteral(t *testing.T) {
 	if !strings.Contains(out, "5") {
 		t.Errorf("expected [N==+5] to match uint 5, got: %s", out)
 	}
+}
+
+// TestHandleDecode_RawUnwrapsInterfaces covers the raw-mode string check, which
+// used to peel a single InterfaceValue layer in this package. It now delegates
+// to gq.Render, which unwraps recursively.
+//
+// The subtests split by reachability: ordinary gob encoding collapses nested
+// interfaces, so a stream can only carry the single-wrap shape. The
+// doubly-wrapped shape comes from adversarial streams, so it is pinned against
+// the renderer directly — and covered end to end by the fuzz targets.
+func TestHandleDecode_RawUnwrapsInterfaces(t *testing.T) {
+	type holder struct{ V any }
+
+	t.Run("single interface layer through the tool", func(t *testing.T) {
+		gob.Register(holder{})
+
+		out := callDecode(t, tools.DecodeInput{
+			Data:  gobBase64(t, holder{V: "hello"}),
+			Query: ".V",
+			Raw:   true,
+		})
+		assert.Equal(t, "hello\n", out)
+	})
+
+	t.Run("nested interface layers", func(t *testing.T) {
+		nested := gobspect.InterfaceValue{
+			Value: gobspect.InterfaceValue{
+				Value: gobspect.StringValue{V: "hello"},
+			},
+		}
+
+		var buf bytes.Buffer
+		require.NoError(t, gq.Render(&buf, nested, gq.RenderOptions{Raw: true}))
+		assert.Equal(t, "hello\n", buf.String(), "raw mode must unwrap every interface layer")
+	})
 }

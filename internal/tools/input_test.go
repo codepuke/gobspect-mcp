@@ -19,9 +19,11 @@ import (
 	"github.com/ulikunitz/xz"
 )
 
+const testReadLimit = 64 << 20
+
 func TestResolve_Base64Std(t *testing.T) {
 	b := gobEncode(t, 42)
-	r, err := tools.Resolve(base64.StdEncoding.EncodeToString(b), "")
+	r, err := tools.Resolve(base64.StdEncoding.EncodeToString(b), "", testReadLimit)
 	require.NoError(t, err)
 	defer r.Close()
 	got, err := io.ReadAll(r)
@@ -33,7 +35,7 @@ func TestResolve_Base64RawFallback(t *testing.T) {
 	b := gobEncode(t, "hello")
 	// RawStdEncoding omits padding '=' characters.
 	raw := base64.RawStdEncoding.EncodeToString(b)
-	r, err := tools.Resolve(raw, "")
+	r, err := tools.Resolve(raw, "", testReadLimit)
 	require.NoError(t, err)
 	defer r.Close()
 	got, err := io.ReadAll(r)
@@ -42,23 +44,23 @@ func TestResolve_Base64RawFallback(t *testing.T) {
 }
 
 func TestResolve_InvalidBase64(t *testing.T) {
-	_, err := tools.Resolve("!!!not-base64!!!", "")
+	_, err := tools.Resolve("!!!not-base64!!!", "", testReadLimit)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "decoding base64")
 }
 
 func TestResolve_BothProvided(t *testing.T) {
-	_, err := tools.Resolve("dGVzdA==", "somefile.gob")
+	_, err := tools.Resolve("dGVzdA==", "somefile.gob", testReadLimit)
 	require.Error(t, err)
 }
 
 func TestResolve_NeitherProvided(t *testing.T) {
-	_, err := tools.Resolve("", "")
+	_, err := tools.Resolve("", "", testReadLimit)
 	require.Error(t, err)
 }
 
 func TestResolve_File(t *testing.T) {
-	r, err := tools.Resolve("", fixturePath("simple_struct.gob"))
+	r, err := tools.Resolve("", fixturePath("simple_struct.gob"), testReadLimit)
 	require.NoError(t, err)
 	defer r.Close()
 	b, err := io.ReadAll(r)
@@ -67,7 +69,7 @@ func TestResolve_File(t *testing.T) {
 }
 
 func TestResolve_FileNotFound(t *testing.T) {
-	_, err := tools.Resolve("", "/nonexistent/path/to/file.gob")
+	_, err := tools.Resolve("", "/nonexistent/path/to/file.gob", testReadLimit)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "opening file")
 }
@@ -97,7 +99,7 @@ func TestResolve_CompressedFiles(t *testing.T) {
 			path := filepath.Join(dir, "data.gob"+tc.ext)
 			tc.compress(t, path, raw)
 
-			r, err := tools.Resolve("", path)
+			r, err := tools.Resolve("", path, testReadLimit)
 			require.NoError(t, err)
 			defer r.Close()
 
@@ -108,7 +110,7 @@ func TestResolve_CompressedFiles(t *testing.T) {
 	}
 }
 
-func TestResolve_UnknownExtensionTreatedAsRaw(t *testing.T) {
+func TestResolve_UncompressedPassesThrough(t *testing.T) {
 	raw, err := os.ReadFile(fixturePath("simple_struct.gob"))
 	require.NoError(t, err)
 
@@ -116,7 +118,7 @@ func TestResolve_UnknownExtensionTreatedAsRaw(t *testing.T) {
 	path := filepath.Join(dir, "data.weird")
 	require.NoError(t, os.WriteFile(path, raw, 0o644))
 
-	r, err := tools.Resolve("", path)
+	r, err := tools.Resolve("", path, testReadLimit)
 	require.NoError(t, err)
 	defer r.Close()
 
@@ -125,49 +127,108 @@ func TestResolve_UnknownExtensionTreatedAsRaw(t *testing.T) {
 	assert.Equal(t, raw, got)
 }
 
-func TestResolve_CorruptGzip(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "bogus.gob.gz")
-	require.NoError(t, os.WriteFile(path, []byte("not a gzip stream"), 0o644))
+// Detection is by content, so the name a compressed file happens to carry is
+// irrelevant: a gzipped stream named .gob decompresses, and a plain gob stream
+// named .gz does not error.
+func TestResolve_ExtensionIsIgnored(t *testing.T) {
+	raw, err := os.ReadFile(fixturePath("simple_struct.gob"))
+	require.NoError(t, err)
 
-	_, err := tools.Resolve("", path)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "gzip")
-}
-
-func TestResolve_CorruptZstd(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "bogus.gob.zst")
-	require.NoError(t, os.WriteFile(path, []byte("not a zstd stream"), 0o644))
-
-	// klauspost/compress validates lazily — the error may surface on the
-	// first read rather than on NewReader.
-	r, err := tools.Resolve("", path)
-	if err == nil {
-		_, err = io.ReadAll(r)
-		r.Close()
+	cases := []struct {
+		name  string
+		file  string
+		write func(t *testing.T, path string, raw []byte)
+	}{
+		{"gzip content named .gob", "data.gob", writeGzip},
+		{"gzip content named .txt", "data.txt", writeGzip},
+		{"zstd content named .gob", "data.gob", writeZstd},
+		{"plain gob named .gz", "data.gob.gz", writePlain},
+		{"plain gob named .zip", "data.zip", writePlain},
+		{"compound suffix", "data.gob.gz", writeGzip},
 	}
-	require.Error(t, err)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), tc.file)
+			tc.write(t, path, raw)
+
+			r, err := tools.Resolve("", path, testReadLimit)
+			require.NoError(t, err)
+			defer r.Close()
+
+			got, err := io.ReadAll(r)
+			require.NoError(t, err)
+			assert.Equal(t, raw, got)
+		})
+	}
 }
 
-func TestResolve_CorruptXz(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "bogus.gob.xz")
-	require.NoError(t, os.WriteFile(path, []byte("not an xz stream"), 0o644))
+// Compressed base64 data is decompressed too, so the data and file inputs
+// accept the same bytes.
+func TestResolve_CompressedBase64Data(t *testing.T) {
+	raw, err := os.ReadFile(fixturePath("simple_struct.gob"))
+	require.NoError(t, err)
 
-	_, err := tools.Resolve("", path)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "xz")
+	cases := []struct {
+		name  string
+		write func(t *testing.T, path string, raw []byte)
+	}{
+		{"gzip", writeGzip},
+		{"zstd", writeZstd},
+		{"bzip2", writeBzip2},
+		{"xz", writeXz},
+		{"zip", writeZipSingle},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "data.bin")
+			tc.write(t, path, raw)
+			compressed, err := os.ReadFile(path)
+			require.NoError(t, err)
+
+			r, err := tools.Resolve(base64.StdEncoding.EncodeToString(compressed), "", testReadLimit)
+			require.NoError(t, err)
+			defer r.Close()
+
+			got, err := io.ReadAll(r)
+			require.NoError(t, err)
+			assert.Equal(t, raw, got)
+		})
+	}
 }
 
-func TestResolve_CorruptZip(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "bogus.zip")
-	require.NoError(t, os.WriteFile(path, []byte("not a zip archive"), 0o644))
+// Content that claims a format by its magic bytes but is not valid in that
+// format still errors — either at open or on the first read.
+func TestResolve_CorruptCompressedContent(t *testing.T) {
+	cases := []struct {
+		name    string
+		content []byte
+		wantMsg string
+	}{
+		{"gzip", append([]byte{0x1f, 0x8b}, []byte("garbage")...), "gzip"},
+		{"zstd", append([]byte{0x28, 0xb5, 0x2f, 0xfd}, []byte("garbage")...), ""},
+		{"xz", append([]byte{0xfd, '7', 'z', 'X', 'Z', 0x00}, []byte("garbage")...), "xz"},
+		{"zip", append([]byte("PK\x03\x04"), []byte("garbage")...), "zip"},
+	}
 
-	_, err := tools.Resolve("", path)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "zip")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "bogus.bin")
+			require.NoError(t, os.WriteFile(path, tc.content, 0o644))
+
+			// Some codecs validate lazily, so the error may surface on read.
+			r, err := tools.Resolve("", path, testReadLimit)
+			if err == nil {
+				_, err = io.ReadAll(r)
+				r.Close()
+			}
+			require.Error(t, err)
+			if tc.wantMsg != "" {
+				assert.Contains(t, err.Error(), tc.wantMsg)
+			}
+		})
+	}
 }
 
 func TestResolve_ZipMultipleEntries(t *testing.T) {
@@ -185,7 +246,7 @@ func TestResolve_ZipMultipleEntries(t *testing.T) {
 	require.NoError(t, zw.Close())
 	require.NoError(t, f.Close())
 
-	_, err = tools.Resolve("", path)
+	_, err = tools.Resolve("", path, testReadLimit)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exactly one file")
 }
@@ -199,26 +260,44 @@ func TestResolve_ZipEmpty(t *testing.T) {
 	require.NoError(t, zw.Close())
 	require.NoError(t, f.Close())
 
-	_, err = tools.Resolve("", path)
+	_, err = tools.Resolve("", path, testReadLimit)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exactly one file")
 }
 
-func TestResolve_CompoundExtensionUsesOutermost(t *testing.T) {
+// The source cap bounds the compressed bytes read, which is what keeps zip's
+// full-archive buffering from being unbounded.
+func TestResolve_SourceCap(t *testing.T) {
 	raw, err := os.ReadFile(fixturePath("simple_struct.gob"))
 	require.NoError(t, err)
 
-	dir := t.TempDir()
-	path := filepath.Join(dir, "data.gob.gz")
-	writeGzip(t, path, raw)
+	t.Run("file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "data.gob")
+		require.NoError(t, os.WriteFile(path, raw, 0o644))
 
-	r, err := tools.Resolve("", path)
-	require.NoError(t, err)
-	defer r.Close()
+		r, err := tools.Resolve("", path, 4)
+		require.NoError(t, err)
+		defer r.Close()
 
-	got, err := io.ReadAll(r)
-	require.NoError(t, err)
-	assert.Equal(t, raw, got)
+		_, err = io.ReadAll(r)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exceeds read_limit")
+	})
+
+	t.Run("data", func(t *testing.T) {
+		r, err := tools.Resolve(base64.StdEncoding.EncodeToString(raw), "", 4)
+		require.NoError(t, err)
+		defer r.Close()
+
+		_, err = io.ReadAll(r)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exceeds read_limit")
+	})
+}
+
+func writePlain(t *testing.T, path string, raw []byte) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(path, raw, 0o644))
 }
 
 func gobEncode(t *testing.T, v any) []byte {
@@ -228,62 +307,85 @@ func gobEncode(t *testing.T, v any) []byte {
 	return buf.Bytes()
 }
 
+// The compressors below come in pairs: a byte-producing form the fuzz seeds
+// use, and a file-writing wrapper for the Resolve tests.
+
+func gzipToBytes(tb testing.TB, raw []byte) []byte {
+	tb.Helper()
+	var buf bytes.Buffer
+	w := gzip.NewWriter(&buf)
+	_, err := w.Write(raw)
+	require.NoError(tb, err)
+	require.NoError(tb, w.Close())
+	return buf.Bytes()
+}
+
+func zstdToBytes(tb testing.TB, raw []byte) []byte {
+	tb.Helper()
+	var buf bytes.Buffer
+	w, err := zstd.NewWriter(&buf)
+	require.NoError(tb, err)
+	_, err = w.Write(raw)
+	require.NoError(tb, err)
+	require.NoError(tb, w.Close())
+	return buf.Bytes()
+}
+
+func bzip2ToBytes(tb testing.TB, raw []byte) []byte {
+	tb.Helper()
+	var buf bytes.Buffer
+	w, err := dsnetbz2.NewWriter(&buf, nil)
+	require.NoError(tb, err)
+	_, err = w.Write(raw)
+	require.NoError(tb, err)
+	require.NoError(tb, w.Close())
+	return buf.Bytes()
+}
+
+func xzToBytes(tb testing.TB, raw []byte) []byte {
+	tb.Helper()
+	var buf bytes.Buffer
+	w, err := xz.NewWriter(&buf)
+	require.NoError(tb, err)
+	_, err = w.Write(raw)
+	require.NoError(tb, err)
+	require.NoError(tb, w.Close())
+	return buf.Bytes()
+}
+
+func zipToBytes(tb testing.TB, raw []byte) []byte {
+	tb.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("payload.gob")
+	require.NoError(tb, err)
+	_, err = w.Write(raw)
+	require.NoError(tb, err)
+	require.NoError(tb, zw.Close())
+	return buf.Bytes()
+}
+
 func writeGzip(t *testing.T, path string, raw []byte) {
 	t.Helper()
-	f, err := os.Create(path)
-	require.NoError(t, err)
-	defer f.Close()
-	w := gzip.NewWriter(f)
-	_, err = w.Write(raw)
-	require.NoError(t, err)
-	require.NoError(t, w.Close())
+	require.NoError(t, os.WriteFile(path, gzipToBytes(t, raw), 0o644))
 }
 
 func writeZstd(t *testing.T, path string, raw []byte) {
 	t.Helper()
-	f, err := os.Create(path)
-	require.NoError(t, err)
-	defer f.Close()
-	w, err := zstd.NewWriter(f)
-	require.NoError(t, err)
-	_, err = w.Write(raw)
-	require.NoError(t, err)
-	require.NoError(t, w.Close())
+	require.NoError(t, os.WriteFile(path, zstdToBytes(t, raw), 0o644))
 }
 
 func writeBzip2(t *testing.T, path string, raw []byte) {
 	t.Helper()
-	f, err := os.Create(path)
-	require.NoError(t, err)
-	defer f.Close()
-	w, err := dsnetbz2.NewWriter(f, nil)
-	require.NoError(t, err)
-	_, err = w.Write(raw)
-	require.NoError(t, err)
-	require.NoError(t, w.Close())
+	require.NoError(t, os.WriteFile(path, bzip2ToBytes(t, raw), 0o644))
 }
 
 func writeXz(t *testing.T, path string, raw []byte) {
 	t.Helper()
-	f, err := os.Create(path)
-	require.NoError(t, err)
-	defer f.Close()
-	w, err := xz.NewWriter(f)
-	require.NoError(t, err)
-	_, err = w.Write(raw)
-	require.NoError(t, err)
-	require.NoError(t, w.Close())
+	require.NoError(t, os.WriteFile(path, xzToBytes(t, raw), 0o644))
 }
 
 func writeZipSingle(t *testing.T, path string, raw []byte) {
 	t.Helper()
-	f, err := os.Create(path)
-	require.NoError(t, err)
-	defer f.Close()
-	zw := zip.NewWriter(f)
-	w, err := zw.Create("payload.gob")
-	require.NoError(t, err)
-	_, err = w.Write(raw)
-	require.NoError(t, err)
-	require.NoError(t, zw.Close())
+	require.NoError(t, os.WriteFile(path, zipToBytes(t, raw), 0o644))
 }

@@ -3,9 +3,11 @@ package tools
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/codepuke/gobspect"
+	"github.com/codepuke/gobspect/gq"
 	"github.com/codepuke/gobspect/query"
 	"github.com/codepuke/gobspect/sortval"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -30,6 +32,8 @@ type DecodeInput struct {
 	TimeFormat      string `json:"time_format,omitempty"       jsonschema:"Go time layout for time.Time values (default: RFC3339Nano)"`
 	Bytes           string `json:"bytes,omitempty"             jsonschema:"Byte rendering: hex (default), base64, or literal"`
 	MaxBytes        *int   `json:"max_bytes,omitempty"         jsonschema:"Truncation limit for byte slices (0 = no limit; default 64)"`
+	ReadLimit       *int64 `json:"read_limit,omitempty"        jsonschema:"Max decompressed bytes to read from the input (default 67108864, max 1073741824)"`
+	OutputLimit     *int   `json:"output_limit,omitempty"      jsonschema:"Max response bytes before truncation (default 1048576, max 16777216)"`
 }
 
 func registerDecode(s *mcp.Server) {
@@ -40,7 +44,12 @@ func registerDecode(s *mcp.Server) {
 }
 
 func handleDecode(_ context.Context, _ *mcp.CallToolRequest, in DecodeInput) (*mcp.CallToolResult, any, error) {
-	r, err := Resolve(in.Data, in.File)
+	readLimit, outputLimit, err := resolveLimits(in.ReadLimit, in.OutputLimit)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	r, err := Resolve(in.Data, in.File, readLimit)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -53,6 +62,7 @@ func handleDecode(_ context.Context, _ *mcp.CallToolRequest, in DecodeInput) (*m
 	if format != "pretty" && format != "json" {
 		return nil, nil, fmt.Errorf("unknown format %q; use pretty or json", format)
 	}
+	renderFormat, _ := gq.ParseFormat(format)
 	if in.Index != nil && *in.Index < 0 {
 		return nil, nil, fmt.Errorf("index must be non-negative")
 	}
@@ -67,7 +77,7 @@ func handleDecode(_ context.Context, _ *mcp.CallToolRequest, in DecodeInput) (*m
 		maxBytes = *in.MaxBytes
 	}
 
-	var inspOpts []gobspect.Option
+	inspOpts := []gobspect.Option{gobspect.WithReadLimit(readLimit)}
 	if in.TimeFormat != "" {
 		inspOpts = append(inspOpts, gobspect.WithTimeFormat(in.TimeFormat))
 	}
@@ -94,75 +104,56 @@ func handleDecode(_ context.Context, _ *mcp.CallToolRequest, in DecodeInput) (*m
 
 	stream := ins.Stream(r)
 	var buf bytes.Buffer
-	idx := 0
-	anyMatch := false
-	resultN := 0
 
-	if len(sortSpec.Keys) > 0 {
-		var allResults []gobspect.Value
-		for v, err := range stream.Values() {
-			if err != nil {
-				return nil, nil, fmt.Errorf("decoding stream: %w", err)
-			}
-			if in.Index != nil && idx != *in.Index {
-				idx++
-				continue
-			}
-			for result := range query.AllPathSeq(v, path) {
-				anyMatch = true
-				allResults = append(allResults, result)
-			}
-			idx++
-			if in.Index != nil && idx > *in.Index {
-				break
-			}
-		}
-
-		sorted := sortval.SortMatches(sortval.SeqOf(allResults), sortSpec)
-		for pos, result := range sorted {
-			if pos < in.Offset {
-				continue
-			}
-			if err := writeDecodeValue(&buf, result, format, in.Raw, in.Compact, fmtOpts); err != nil {
-				return nil, nil, err
-			}
-			resultN++
-			if in.Limit > 0 && resultN >= in.Limit {
-				break
-			}
-		}
-	} else {
-	outer:
-		for v, err := range stream.Values() {
-			if err != nil {
-				return nil, nil, fmt.Errorf("decoding stream: %w", err)
-			}
-			if in.Index != nil && idx != *in.Index {
-				idx++
-				continue
-			}
-			for result := range query.AllPathSeq(v, path) {
-				anyMatch = true
-				pos := resultN
-				resultN++
-				if pos < in.Offset {
-					continue
-				}
-				if err := writeDecodeValue(&buf, result, format, in.Raw, in.Compact, fmtOpts); err != nil {
-					return nil, nil, err
-				}
-				if in.Limit > 0 && resultN-in.Offset >= in.Limit {
-					break outer
-				}
-			}
-			idx++
-			if in.Index != nil && idx > *in.Index {
-				break
-			}
-		}
+	p := gq.Pipeline{
+		Path:   path,
+		Index:  gq.IndexAll,
+		Offset: in.Offset,
+		Limit:  in.Limit,
+		Sort:   sortSpec,
+	}
+	if in.Index != nil {
+		p.Index = *in.Index
 	}
 
-	if queryExpr != "" && !anyMatch {
+	renderOpts := gq.RenderOptions{
+		Format:        renderFormat,
+		Raw:           in.Raw,
+		Compact:       in.Compact,
+		FormatOptions: fmtOpts,
+	}
+
+	// Each result is rendered into a scratch buffer first, so the output limit
+	// cuts between whole values rather than mid-record.
+	var scratch bytes.Buffer
+	truncated := false
+	matched, err := p.Run(stream, func(v gobspect.Value) error {
+		scratch.Reset()
+		if err := gq.Render(&scratch, v, renderOpts); err != nil {
+			return err
+		}
+		if buf.Len()+scratch.Len() > outputLimit {
+			truncated = true
+			return errOutputLimit
+		}
+		buf.Write(scratch.Bytes())
+		return nil
+	})
+	if err != nil && !errors.Is(err, errOutputLimit) {
+		// The pipeline returns decode errors unwrapped and sink errors wrapped
+		// in SinkError; both need the context the handler has always added.
+		var sinkErr *gq.SinkError
+		if errors.As(err, &sinkErr) {
+			return nil, nil, sinkErr.Err
+		}
+		return nil, nil, fmt.Errorf("decoding stream: %w", err)
+	}
+
+	if truncated {
+		buf.WriteString(truncationNotice(outputLimit))
+	}
+
+	if queryExpr != "" && !matched {
 		if in.NullOnMiss {
 			buf.WriteString("null\n")
 		} else {
@@ -173,40 +164,4 @@ func handleDecode(_ context.Context, _ *mcp.CallToolRequest, in DecodeInput) (*m
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: buf.String()}},
 	}, nil, nil
-}
-
-func writeDecodeValue(buf *bytes.Buffer, v gobspect.Value, format string, raw, compact bool, fmtOpts []gobspect.FormatOption) error {
-	if format == "json" {
-		var out []byte
-		var err error
-		if compact {
-			out, err = gobspect.ToJSON(v)
-		} else {
-			out, err = gobspect.ToJSONIndent(v, "", "  ")
-		}
-		if err != nil {
-			return fmt.Errorf("encoding JSON: %w", err)
-		}
-		buf.Write(out)
-		buf.WriteByte('\n')
-		return nil
-	}
-
-	// pretty
-	if raw {
-		target := v
-		if iv, ok := target.(gobspect.InterfaceValue); ok {
-			target = iv.Value
-		}
-		if sv, ok := target.(gobspect.StringValue); ok {
-			buf.WriteString(sv.V)
-			buf.WriteByte('\n')
-			return nil
-		}
-	}
-	if err := gobspect.FormatTo(buf, v, fmtOpts...); err != nil {
-		return err
-	}
-	buf.WriteByte('\n')
-	return nil
 }

@@ -260,17 +260,28 @@ base64 < data.gob
 
 #### Automatic decompression
 
-When using `file`, the server inspects the path's extension (case-insensitive) and transparently decompresses on read:
+Compressed input is detected by its leading magic bytes and decompressed transparently, on **both** `data` and `file`:
 
-| Extension | Format |
-|-----------|--------|
-| `.gz`, `.gzip` | gzip |
-| `.zst`, `.zstd` | zstandard |
-| `.bz2` | bzip2 |
-| `.xz` | xz |
-| `.zip` | zip (archive must contain exactly one entry) |
+| Format | Notes |
+|--------|-------|
+| gzip | |
+| zstandard | |
+| bzip2 | |
+| xz | |
+| zip | archive must contain exactly one entry; buffered fully in memory |
 
-So `/data/orders.gob.gz` and `/data/orders.gob` work identically. Compound extensions resolve on the outermost suffix only. The `data` parameter is always treated as raw gob bytes — decompress client-side before base64-encoding.
+Detection is by content, never by file name, so `/data/orders.gob.gz`, `/data/orders.gob`, and a gzipped file that someone named `.txt` all work. A mislabeled extension cannot select the wrong codec. Anything that is not one of these formats passes through unchanged, and one compression layer is removed — a gzipped zip is not recursed into.
+
+#### Resource limits
+
+Every tool accepts two limits, because all input is untrusted and the whole formatted result comes back as a single response:
+
+| Parameter | Default | Maximum | Description |
+|-----------|---------|---------|-------------|
+| `read_limit` | 67108864 (64 MiB) | 1073741824 (1 GiB) | Maximum **decompressed** bytes read from the input. Stops decompression bombs: a small compressed input can expand enormously. |
+| `output_limit` | 1048576 (1 MiB) | 16777216 (16 MiB) | Maximum response bytes. |
+
+Zero is not accepted for either — unlimited is the configuration these guard against. `gob_decode`, `gob_tabular`, and `gob_schema` truncate at a record boundary and append a notice; `gob_types` and `gob_keys` return a single JSON document, so they report an error rather than emit invalid JSON.
 
 ---
 
@@ -303,7 +314,7 @@ type Time    // GobEncoder
 
 Types annotated `// GobEncoder` are opaque — the library auto-decodes common ones (`time.Time`, `math/big.Int`, `math/big.Float`, `math/big.Rat`, `uuid.UUID`, `decimal.Decimal`).
 
-Optional parameters: `time_format` (Go time layout, default RFC3339Nano).
+Optional parameters: `time_format` (Go time layout, default RFC3339Nano), `read_limit`, `output_limit`.
 
 ---
 
@@ -314,6 +325,8 @@ Return type metadata as a JSON array. For programmatic inspection of field IDs a
 ```json
 { "file": "/data/orders.gob" }
 ```
+
+Optional parameters: `time_format`, `read_limit`, `output_limit`.
 
 ---
 
@@ -339,6 +352,8 @@ Decode and query values. The most versatile tool.
 | `max_bytes` | 64 | Truncation limit for byte slices (0 = no limit) |
 | `null_on_miss` | false | Return `"null"` instead of error when path not found |
 | `time_format` | RFC3339Nano | Go time layout for `time.Time` |
+| `read_limit` | 64 MiB | Max decompressed input bytes |
+| `output_limit` | 1 MiB | Max response bytes |
 
 JSON output is **newline-delimited** (one object per line), not a JSON array.
 
@@ -364,6 +379,8 @@ Export values as CSV or TSV.
 | `union` | Grow headers as new columns appear; earlier rows get empty cells |
 | `partition` | Emit a blank line and a new header when the type changes |
 
+In `partition` mode a `sort` orders rows **within** each partition, so row order matches the tables that are printed.
+
 ---
 
 ### `gob_keys`
@@ -374,6 +391,8 @@ List navigable keys at a given path. Returns a JSON string array.
 |-----------|---------|-------------|
 | `query` | `""` | Path to navigate to before listing keys |
 | `index` | 0 | Which top-level value to inspect |
+| `read_limit` | 64 MiB | Max decompressed input bytes |
+| `output_limit` | 1 MiB | Max response bytes |
 | + `data` / `file` | — | Input source |
 
 For a struct: field names. For a slice/array: index strings (`"0"`, `"1"`, …). For a `map[string]T`: map keys.

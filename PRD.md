@@ -17,9 +17,10 @@ The server runs as a subprocess communicating over stdin/stdout (`StdioTransport
 
 - No encoding support — decode/inspect only
 - No HTTP or WebSocket transport — stdio only
-- No streaming of large result sets — results collected in memory
+- No streaming of large result sets — results collected in memory, bounded by `output_limit` (see §5.4)
 - No custom opaque decoder registration via MCP — built-in decoders only
-- No compressed `data` handling (base64 bytes must be raw gob). File inputs are auto-decompressed by extension (see §5.3).
+- No aggregation tool (`gq -count/-sum/-min/-max/-avg`); `gobspect/gq.Aggregate` makes one cheap to add later
+- No `jsonl` output format and no ANSI color, though `gobspect/gq` supports both
 
 ---
 
@@ -43,17 +44,20 @@ func main() {
 
 ```
 internal/tools/
-  input.go      — Resolve(data, file string) (io.Reader, error); Register(s *mcp.Server)
+  input.go      — Resolve(data, file string, readLimit int64) (io.ReadCloser, error); Register(s *mcp.Server)
+  limits.go     — read/output limit constants, resolveLimits, output-cap helpers
   schema.go     — gob_schema handler
   types.go      — gob_types handler
   decode.go     — gob_decode handler
-  tabular.go    — gob_tabular handler + tabularPrinter implementation
+  tabular.go    — gob_tabular handler
   keys.go       — gob_keys handler
-  sort.go       — sorting helpers (SortSpec, ParseSortSpec, sortMatches) — shared by decode + tabular
+  fuzz_test.go  — fuzz targets for every handler and for Resolve
   testdata/
-    generate.go — go:generate helper that writes fixture .gob files
+    generate.go — helper that writes fixture .gob files
     *.gob       — generated fixtures
 ```
+
+Sorting, the result pipeline, value rendering, and decompression all come from `gobspect` subpackages (`gq`, `sortval`, `tabular`, `decompress`); this server holds no copy of them.
 
 `Register(s *mcp.Server)` in `input.go` (or a dedicated `register.go`) calls `mcp.AddTool` for each of the five tools and is the single call site from `main.go`.
 
@@ -70,31 +74,44 @@ Every tool accepts exactly one of:
 If both are non-empty, `Resolve` returns an error: `"provide either data or file, not both"`.
 If both are empty, `Resolve` returns an error: `"provide either data or file"`.
 
-### 5.2 `input.Resolve` Signature
+### 5.2 `tools.Resolve` Signature
 
 ```go
-// Resolve decodes base64 data or opens the named file and returns a reader
-// over the raw gob bytes. For file inputs, a recognized compression extension
-// causes the reader to be wrapped with a matching decompressor. Caller is
-// responsible for closing file-based readers.
-func Resolve(data, file string) (io.ReadCloser, error)
+// Resolve decodes base64 data or opens the named file and returns a ReadCloser
+// over the raw gob bytes. Compression is detected by sniffing the input's
+// leading magic bytes. readLimit caps the bytes read from the source.
+// Caller must close the returned reader.
+func Resolve(data, file string, readLimit int64) (io.ReadCloser, error)
 ```
 
-Returns an `io.ReadCloser` — for base64 data it wraps `bytes.Reader` with a no-op closer; for plain files it returns the open `*os.File`; for compressed files it returns a composite closer that closes both the decompressor and the underlying file. Callers `defer r.Close()`.
+Returns an `io.ReadCloser`. For file inputs it is a composite closer that closes both the decompressor and the underlying `*os.File` — `decompress.Reader` never closes its source. Callers `defer r.Close()`.
 
 ### 5.3 Automatic Decompression
 
-When `file` is provided, `Resolve` matches the path's extension case-insensitively and wraps the reader with the matching decompressor so handlers always see raw gob bytes:
+`Resolve` delegates to `github.com/codepuke/gobspect/decompress.Reader`, which sniffs the leading magic bytes and removes one compression layer:
 
-| Extension | Wrapper |
-|-----------|---------|
-| `.gz`, `.gzip` | `compress/gzip.NewReader` |
-| `.zst`, `.zstd` | `github.com/klauspost/compress/zstd.NewReader` |
-| `.bz2` | `compress/bzip2.NewReader` |
-| `.xz` | `github.com/ulikunitz/xz.NewReader` |
-| `.zip` | `archive/zip.OpenReader` — archive must contain exactly one file; otherwise returns `"zip archive must contain exactly one file"` |
+| Format | Notes |
+|--------|-------|
+| gzip | |
+| zstandard | |
+| xz | |
+| bzip2 | |
+| zip | archive must contain exactly one file; otherwise returns `"zip archive must contain exactly one file, got N"`. Buffered fully in memory. |
 
-Compound suffixes (`.gob.gz`) are resolved by the outermost extension. Unrecognized extensions are treated as raw gob. `data` input is never decompressed — clients must pass raw gob bytes encoded as base64.
+Detection is by content, not by file name, and applies to `data` and `file` alike: a gzipped file named `.gob` is decompressed, and a plain gob file named `.gz` is not misread. Unrecognized input passes through byte-identical. Nested layers are not recursed into.
+
+### 5.4 Resource Limits
+
+Every tool accepts `read_limit` and `output_limit`. All input is untrusted, and the entire formatted result is returned as a single MCP text response, so an unbounded result is both a memory and a context-window problem.
+
+| Parameter | Type | Default | Maximum | Meaning |
+|-----------|------|---------|---------|---------|
+| `read_limit` | `*int64` | 67108864 | 1073741824 | Decompressed bytes read from the input, via `gobspect.WithReadLimit`; also caps the source reader inside `Resolve`, bounding zip's in-memory buffering |
+| `output_limit` | `*int` | 1048576 | 16777216 | Response bytes |
+
+A nil pointer means "unset"; an explicit `0` is rejected, since unlimited is the configuration these limits exist to prevent. Over-maximum values are rejected naming the ceiling.
+
+On overflow: `gob_decode` stops between whole rendered values, `gob_tabular` and `gob_schema` trim to a line boundary, and each appends `... output truncated at N bytes; narrow the query, lower limit, or raise output_limit`. `gob_types` and `gob_keys` return one JSON document, so they return an error rather than emit invalid JSON.
 
 ---
 
@@ -110,11 +127,13 @@ type SchemaInput struct {
     Data       string `json:"data,omitempty"       jsonschema:"Base64-encoded gob bytes"`
     File       string `json:"file,omitempty"       jsonschema:"Path to gob file"`
     TimeFormat string `json:"time_format,omitempty" jsonschema:"Go time layout for time.Time values (default: RFC3339Nano)"`
+    ReadLimit   *int64 `json:"read_limit,omitempty"   jsonschema:"Max decompressed bytes to read from the input (default 67108864, max 1073741824)"`
+    OutputLimit *int   `json:"output_limit,omitempty" jsonschema:"Max response bytes before truncation (default 1048576, max 16777216)"`
 }
 ```
 
 **Behavior:**
-1. Call `input.Resolve(in.Data, in.File)` to get an `io.Reader`.
+1. Call `resolveLimits(in.ReadLimit, in.OutputLimit)`, then `tools.Resolve(in.Data, in.File, readLimit)` to get an `io.ReadCloser`.
 2. Build `gobspect.New(opts...)` with `WithTimeFormat` if `TimeFormat` is set.
 3. Call `ins.Stream(r).Schema()`.
 4. Return `schema.String()` as a text content block.
@@ -154,6 +173,8 @@ type TypesInput struct {
     Data       string `json:"data,omitempty"`
     File       string `json:"file,omitempty"`
     TimeFormat string `json:"time_format,omitempty"`
+    ReadLimit   *int64 `json:"read_limit,omitempty"`
+    OutputLimit *int   `json:"output_limit,omitempty"`
 }
 ```
 
