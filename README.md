@@ -281,7 +281,17 @@ Every tool accepts two limits, because all input is untrusted and the whole form
 | `read_limit` | 67108864 (64 MiB) | 1073741824 (1 GiB) | Maximum **decompressed** bytes read from the input. Stops decompression bombs: a small compressed input can expand enormously. |
 | `output_limit` | 1048576 (1 MiB) | 16777216 (16 MiB) | Maximum response bytes. |
 
-Zero is not accepted for either — unlimited is the configuration these guard against. `gob_decode`, `gob_tabular`, and `gob_schema` truncate at a record boundary and append a notice; `gob_types` and `gob_keys` return a single JSON document, so they report an error rather than emit invalid JSON.
+Zero is not accepted for either — unlimited is the configuration these guard against. What happens at the output limit differs per tool, because their output has different natural boundaries:
+
+| Tool | Behavior at `output_limit` |
+|------|---------------------------|
+| `gob_decode` | Stops between whole rendered values, then appends a truncation notice |
+| `gob_tabular` | Trims to a whole line, then appends a truncation notice |
+| `gob_schema` | Trims to a whole line, then appends a truncation notice |
+| `gob_types` | Returns an error |
+| `gob_keys` | Returns an error |
+
+`gob_types` and `gob_keys` each emit a single JSON document, so a truncated response would not parse — they refuse rather than cut.
 
 ---
 
@@ -339,7 +349,7 @@ Decode and query values. The most versatile tool.
 | `data` / `file` | — | Input source (one required) |
 | `query` | `""` | Path expression (empty = entire value) |
 | `format` | `"pretty"` | `"pretty"` or `"json"` |
-| `index` | all | Which top-level value to use (0-based) |
+| `index` | all | Which top-level value to use (0-based); omit for all |
 | `limit` | 0 | Stop after N results (0 = no limit) |
 | `offset` | 0 | Skip first N results |
 | `sort` | `""` | Comma-separated field names to sort by |
@@ -350,7 +360,7 @@ Decode and query values. The most versatile tool.
 | `compact` | false | Compact JSON (no indentation) |
 | `bytes` | `"hex"` | Byte rendering: `hex`, `base64`, `literal` |
 | `max_bytes` | 64 | Truncation limit for byte slices (0 = no limit) |
-| `null_on_miss` | false | Return `"null"` instead of error when path not found |
+| `null_on_miss` | false | Emit `null` instead of an error when the query matches nothing (no effect when `query` is empty) |
 | `time_format` | RFC3339Nano | Go time layout for `time.Time` |
 | `read_limit` | 64 MiB | Max decompressed input bytes |
 | `output_limit` | 1 MiB | Max response bytes |
@@ -365,10 +375,25 @@ Export values as CSV or TSV.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
+| `data` / `file` | — | Input source (one required) |
+| `query` | `""` | Path expression (empty = entire value) |
 | `format` | `"csv"` | `"csv"` or `"tsv"` |
 | `no_headers` | false | Suppress the header row |
 | `hetero` | `"first"` | Mixed-type handling (see below) |
-| + all `gob_decode` parameters | | |
+| `index` | all | Which top-level value to use (0-based); omit for all |
+| `limit` | 0 | Stop after N results (0 = no limit) |
+| `offset` | 0 | Skip first N results |
+| `sort` | `""` | Comma-separated field names to sort by |
+| `sort_desc` | false | Reverse sort order |
+| `sort_fold` | false | Case-insensitive string sort |
+| `sort_drop_missing` | false | Exclude rows missing all sort keys |
+| `bytes` | `"hex"` | Byte rendering: `hex`, `base64`, `literal` |
+| `max_bytes` | 64 | Truncation limit for byte slices (0 = no limit) |
+| `time_format` | RFC3339Nano | Go time layout for `time.Time` |
+| `read_limit` | 64 MiB | Max decompressed input bytes |
+| `output_limit` | 1 MiB | Max response bytes |
+
+This is not `gob_decode` with a different renderer: there is no `raw`, `compact`, or `null_on_miss` — none of them mean anything for tabular output — and `format` selects `csv`/`tsv` rather than `pretty`/`json`.
 
 **Heterogeneous mode** — controls what happens when the query matches structs of different Go types:
 
@@ -389,13 +414,16 @@ List navigable keys at a given path. Returns a JSON string array.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
+| `data` / `file` | — | Input source (one required) |
 | `query` | `""` | Path to navigate to before listing keys |
-| `index` | 0 | Which top-level value to inspect |
+| `index` | 0 | Which top-level value to inspect (0-based); omit for the first |
+| `time_format` | RFC3339Nano | Go time layout for `time.Time` |
 | `read_limit` | 64 MiB | Max decompressed input bytes |
 | `output_limit` | 1 MiB | Max response bytes |
-| + `data` / `file` | — | Input source |
 
 For a struct: field names. For a slice/array: index strings (`"0"`, `"1"`, …). For a `map[string]T`: map keys.
+
+Note that `index` defaults differently here. `gob_decode` and `gob_tabular` process every top-level value when `index` is omitted; `gob_keys` inspects only the first, because a single set of keys is the useful answer for navigation. One argument blob reused across tools does not mean the same thing in each.
 
 ---
 
@@ -425,7 +453,7 @@ Expressions are dot-separated path segments. A leading `.` is optional (`.Field`
 | `[Field~pattern]` | `Field` is a collection containing a matching string |
 | `[Field!~pattern]` | `Field` is a collection NOT containing a matching string |
 | `[Field==value]` | `Field` is a number equal to `value` (also `<`, `>`, `<=`, `>=`) |
-| `[Field==true]` | `Field` is the bool `true` |
+| `[Field==true]` | `Field` is the bool `true` (`false` works the same way) |
 | `[F1=a]\|[F2=b]` | OR of two conditions |
 
 Use double quotes inside filters when the pattern contains operator characters: `[Formula="a<b"]`.
@@ -442,6 +470,8 @@ Items.*.SKU,Price,Address/Zip
 ```
 
 Use `/` within a projection to reach a nested field (`Address/Zip` → column named `Zip`).
+
+The `/` form only means nested navigation **inside a projection** — a segment containing a comma. A bare segment with a slash and no comma is a literal field or map key, since string map keys may contain slashes. To reach a single nested value without projecting, use a dot: `Orders.0.Address.Zip`.
 
 ### Examples
 
