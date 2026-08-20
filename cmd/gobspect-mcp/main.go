@@ -13,11 +13,9 @@ import (
 )
 
 // version is the fallback server version, used when the binary carries no
-// module version of its own. It must equal the repository tag it ships in, and
-// by policy it also tracks the gobspect version in go.mod, because this server
-// is a thin wrapper and the number is most useful to a caller as a statement of
-// which library they are talking to. TestVersionMatchesGoMod and
-// TestVersionMatchesGitTag enforce both.
+// module version of its own. It must equal the repository tag it ships in;
+// TestVersionMatchesGitTag enforces that. It is independent of the gobspect
+// version in go.mod — either can need a patch the other does not.
 const version = "0.3.1"
 
 // serverVersion prefers the module version the toolchain stamps into a binary
